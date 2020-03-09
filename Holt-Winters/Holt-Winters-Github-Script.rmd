@@ -1,0 +1,90 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r load libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(DBI)
+library(bigrquery)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(tidyr) 
+```
+
+We connect to our dataset:
+```{r connect to BigQuery}
+con <- DBI::dbConnect(bigquery(), 
+                      project = "case-study-2-nec-team",
+                      dataset = "logs")
+```
+
+For simple queries, the bigrquery package provides an interface for the tidyverse package. So let's start retrieving minima, maxima and means of all numeric values. A subset for only one host is created to increase the informative value of the analaysis. The same way, the subsets could be created on other attributes (e.g. user groups) as well.
+
+```{r}
+sample <- tbl(con, "raw_view_clean") %>% 
+  filter(hostFull=='320dbb8a36109a6cbef3a3c08b9ac506.9864ddc6a833ccfb66b96fed1567a019')%>% collect()
+```
+
+The following analysis is exemplarily conducted for one variable, CL_Transmit_time_noSubstract. It works equivalently for any other variable. 
+
+```{r}
+##CREATE TIME SERIES (Variable CL_Transmit_time_noSubstract)
+sample_agg <- sample %>% 
+  mutate(Ts = as.POSIXct(Ts, tz = "Europe/Berlin"), # convert factor to time
+         Ts_agg = floor_date(Ts, "minute")) %>% # round down to minute
+  group_by(Ts_agg) %>% 
+  summarise(CL_Transmit_time_noSubstract = median(CL_Transmit_time_noSubstract)) %>% 
+  # Complete the sequence ()
+ complete(Ts_agg = full_seq(Ts_agg, period = 60)) %>% 
+  # Fill the values based on previous record for all columns except the time column
+  fill(-Ts_agg)
+
+#plot time series
+ggplot(sample_agg, aes(x = Ts_agg, y = CL_Transmit_time_noSubstract)) + geom_line()  +labs(x = "Time", y = "CL_Transmit_time_noSubstract")
+```
+
+```{r}
+##RUN HOLT WINTERS
+CL_Transmit_time_noSubstract_TS <- ts(sample_agg$CL_Transmit_time_noSubstract, frequency = 1440)
+#frequency 1440 (minutes per day) 
+
+LogHW <- HoltWinters(CL_Transmit_time_noSubstract_TS, beta=FALSE) 
+
+#Setting the beta parameter of the HoltWinters function to FALSE will result in a model with exponential smoothing suppressing the trend element
+
+#plot HW modelling
+options(repr.plot.width = 1, repr.plot.height = 4)
+plot(LogHW)
+```
+
+```{r}
+##CALCULATE RESIDUALS between observed and fitted values
+#retrieve HW values as data frame
+DLogHW <- data.frame(LogHW[["fitted"]] , x=LogHW[["x"]][1441:4321], Ts_agg=sample_agg$Ts_agg[1441:4321])
+str(DLogHW)
+#HW uses the first period (1 day = 1440 minutes) for training; i.e. fitted values are only available for periods 2 and 3 (minutes [1441:4321])
+
+#plot observed and fitted values
+ggplot(DLogHW, aes(Ts_agg)) + 
+  geom_line(aes(y = xhat, colour = "Fitted")) + 
+  geom_line(aes(y = x, colour = "Observed"))
+
+#calculate and plot residuals
+DLogHW$Residual <- DLogHW$x - DLogHW$xhat
+
+ggplot(DLogHW, aes(Ts_agg)) + 
+  geom_line(aes(y = Residual, colour = "Res"))
+```
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

@@ -1,0 +1,330 @@
+---
+title: "Charts for report and ppt"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+library(bigrquery)
+library(scales)
+```
+Chart 1 - Available observations
+```{r}
+availability_query <- paste0("SELECT ", 
+                        paste0("COUNT(", numeric_vars, ") AS ", numeric_vars, collapse = ", "), " ",
+                        "FROM `case-study-2-nec-team.logs.raw_view`")
+
+availability <- bq_project_query("case-study-2-nec-team", availability_query) %>% bq_table_download() %>% 
+  pivot_longer(., names(.), names_to = "variable", values_to = "count") 
+
+
+```
+
+```{r}
+availability %>% 
+  #remove computed variables 
+  .[c(1:7, 10:11), ] %>% 
+  mutate(variable = fct_reorder(variable, count)) %>% 
+  ggplot() + geom_col(aes(x = variable, y = count/1E6)) + coord_flip() + 
+  labs(title = "Number of valid observations", 
+       subtitle = "(millions)", x = NULL, y = NULL) + 
+  theme(title = element_text(size = 8))
+
+ggsave("final_plots/plot1_report.png", width = 8, height = 8, units = "cm")
+# ggsave("final_plots/plot1_ppt.png", width = 22, height = 14, units = "cm")
+```
+
+Leave out chart 2 with annotations, go straight to the multi-panel one.
+```{r}
+
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+p <- time_series %>% filter(variable %in% c("connections", "CL_RTT", "CL_Retrans", "OS_Retrans", "download_speed_CL_clean", "download_speed_OS_clean") & time < "2018-09-07 18:00:00") %>% 
+  #change variable to ordered factor to manually define order in chart
+  mutate(variable = factor(variable, c("connections", "CL_RTT", "CL_Retrans", "download_speed_CL_clean", "download_speed_OS_clean", "OS_Retrans"))) %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "Connections and QoS per hour", x = NULL, y = NULL) +
+  #make strip texts smaller, remove y scales
+  theme(title = element_text(size = 9),
+        strip.text.y = element_text(size = 5), 
+        axis.text.y = element_blank(), axis.ticks = element_blank())
+
+p + scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot2_report.png", width = 8, height = 16, units = "cm")
+
+p +   scale_x_datetime(date_breaks = "4 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot2_ppt.png", width = 22, height = 14, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+
+
+```{r}
+cdfs_all %>% filter(variable == "bytesReceived") %>% 
+  ggplot() + geom_line(aes(value, CDF), size = 2) + 
+  scale_x_log10(labels = label_bytes()) + 
+  labs(x = NULL, y = "cumulative distribution",
+       title = "CDF for bytesReceived",  caption = "Note: values on log scale.") 
+
+ggsave("final_plots/plot3_report.png", width = 8, height = 8, units = "cm")
+ggsave("final_plots/plot3_ppt.png", width = 10, height = 10, units = "cm")
+```
+
+Qos by load
+
+```{r}
+breakdown_load  %>% filter(variable %in% c("download_speed_CL_clean", "OS_RTT")) %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = load), size = 2, alpha = 0.6) + scale_x_log10() + 
+  scale_colour_manual(values=c("black", "red", "green")) +
+  facet_wrap(vars(variable), nrow = 2, scales = "free_x") +
+  labs(x = NULL, y = "cumulative distribution", 
+       title ="CDF for quality of service by load", caption = "Note: Heavy load is defined as bytesReceived in the top 5%,\n normal is below.")  + 
+  theme(legend.position = "top", title = element_text(size = 9))
+
+ggsave("final_plots/plot4_report.png", width = 8, height = 12, units = "cm")
+# ggsave("final_plots/plot4_ppt.png", width = 8, height = 12, units = "cm")
+```
+
+Bandwidth by load
+```{r}
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+breakdown_load_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00" & variable != "bytesReceivedProxy") %>% 
+  ggplot() + geom_area(aes(time, value, fill = load)) + 
+  facet_grid(rows = vars(variable), scales = "free_y") +
+  scale_fill_manual(values=c("red", "green")) +
+    scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H") +
+  labs(x = NULL, y = NULL,
+       title = "Bandwidth and connections by load",
+       subtitle = "(total bytes transferred and connections per 10 minutes)") +
+  theme(legend.position = "top", title = element_text(size = 7))
+
+ggsave("final_plots/plot5_report.png", width = 8, height = 16, units = "cm")
+
+breakdown_load_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00" & variable %in% c("connections", "bytesReceived")) %>% 
+  ggplot() + geom_area(aes(time, value, fill = load)) + 
+  facet_grid(rows = vars(variable), scales = "free_y") +
+  scale_fill_manual(values=c("red", "green")) +
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H") +
+  labs(x = NULL, y = NULL,
+       title = "Bandwidth and connections by load",
+       subtitle = "(total bytes transferred and connections per 10 minutes)",
+       caption = "Note: Heavy load is defined as bytesReceived in the top 5%,\n normal is below.") +
+  theme(legend.position = "top", title = element_text(size = 7))
+
+ggsave("final_plots/plot5_ppt.png", width = 10, height = 10, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+
+CDF for CL_Retrans by load
+```{r}
+breakdown_load  %>% filter(variable == "CL_Retrans") %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = load), size = 2, alpha = 0.6) + scale_x_log10() + 
+  scale_colour_manual(values=c("black", "red", "green")) +
+  facet_wrap(vars(variable), nrow = 2, scales = "free_x") +
+  labs(x = NULL, y = "cumulative distribution", 
+       title ="CDF for re-transmissions\nbetween user and proxy by load", caption = "Note: Heavy load is defined as bytesReceived in the top 5%,\n normal is below.")  + 
+  theme(legend.position = "top", title = element_text(size = 9))
+
+ggsave("final_plots/plot6_report.png", width = 8, height = 8, units = "cm")
+# ggsave("final_plots/plot6_ppt.png", width = 8, height = 12, units = "cm")
+```
+
+CDF connections per user in ten minutes
+
+```{r}
+p <- cdf_connections_per_user %>%
+  #rename the feature from flows to connections
+  mutate(variable = if_else(variable == "flows", "connections", variable),
+         #reorder the factors
+         variable = factor(variable, c("connections", "hosts", "domains"))) %>%
+  ggplot() + geom_line(aes(value, CDF, colour = variable), size = 2) + scale_x_log10() + 
+  scale_colour_manual(name = "measure",values = c("black", "orange", "red")) +
+  labs(x = NULL, y = "cumulative distribution", 
+       title = "CDF for connections per user\nin 10 minutes",
+       caption = "Note: Counts on log scale.") + 
+  theme(legend.position = "top")
+
+p + theme(title = element_text(size = 8),
+        legend.text = element_text(size = 7))
+ggsave("final_plots/plot7_report.png", width = 8, height = 8, units = "cm")
+
+p
+ggsave("final_plots/plot7_ppt.png", width = 10, height = 10, units = "cm")
+```
+
+Number of connections started at once
+```{r}
+multi_count %>% mutate(number_fct = case_when(number < 7 ~ as.character(number),
+                                              TRUE ~ "7-39")) %>% group_by(number_fct) %>% 
+  summarise(observations = sum(observations)) %>% 
+  ggplot() + geom_col(aes(x = number_fct, y = observations)) + scale_y_log10(labels = label_number()) + 
+  coord_flip() + 
+  labs(title = "Occurance of multiple connections\nstarted at the same time", y = "number of connections", x = "connections started at once",
+       caption = "Note: Counts are on log scale.") + 
+  theme(title = element_text(size = 9))
+
+ggsave("final_plots/plot8_report.png", width = 8, height = 8, units = "cm")
+# ggsave("final_plots/plot8_ppt.png", width = 8, height = 12, units = "cm")
+
+```
+
+CDF connections per host in 10 minutes
+```{r}
+cdf_connections_per_host %>% mutate(variable = if_else(variable == "flows", "connections", variable)) %>% 
+  ggplot() + 
+  geom_line(aes(value, CDF, colour = variable), size = 2) + scale_x_log10() + 
+  scale_colour_manual(name = "measure",values = c("black", "orange")) +
+  labs(x = NULL, y = "cumulative distribution", 
+       title = "CDF for connections per host\nin 10 minutes",
+       caption = "Note: Counts on log scale.") + 
+  theme(legend.position = "top", title = element_text(size = 9))
+
+ggsave("final_plots/plot9_report.png", width = 8, height = 8, units = "cm")
+ggsave("final_plots/plot9_ppt.png", width = 10, height = 10, units = "cm")
+```
+
+CDF connections per user-host combination in 10 minutes
+```{r}
+cdf_connections_per_flow %>% 
+  ggplot() + geom_line(aes(connections, CDF), size = 2) + scale_x_log10() + 
+  labs(x= NULL, y = "cumulative distribution",
+       title = "CDF for connections\nper user-host pair in 10 minutes",
+       caption = "Note: Counts on log scale.") 
+
+ggsave("final_plots/plot10_report.png", width = 8, height = 8, units = "cm")
+ggsave("final_plots/plot10_ppt.png", width = 10, height = 10, units = "cm")
+```
+Direction of transfer ts
+
+```{r}
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+p3 <- breakdown_updown_ts  %>% filter(variable == "connections" & time < "2018-09-07 18:00:00" & time > "2018-09-05 00:00:00") %>% 
+  ggplot() + geom_line(aes(time, value, colour = direction), size = 2) + 
+  labs(x = NULL, y = "connections",
+       title = paste("Time series for connections in 10 minutes\nby main direction")) +
+  theme(legend.position = "top", title = element_text(size = 8))
+
+p3 +  scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot11_report.png", width = 8, height = 8, units = "cm")
+
+p3 + scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot11_ppt.png", width = 10, height = 10, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+
+bandwidth
+
+```{r}
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+
+p4 <- breakdown_updown_bandwidth_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00" & variable == "bytesSent")%>% 
+  ggplot() + geom_area(aes(time, value, fill = direction)) +
+  scale_y_continuous(labels = label_bytes()) +
+  labs(x = NULL, y = NULL,
+       title = "Upload bandwidth by main direction of transfer",
+       subtitle = "(data transferred in 10 minutes)") +
+  theme(legend.position = "top", title = element_text(size = 8),
+        legend.text = element_text(size = 7))
+
+p4 + scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot12_report.png", width = 8, height = 8, units = "cm")
+
+p4 +  scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H")
+ggsave("final_plots/plot12_ppt.png", width = 10, height = 10, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+
+UNADA-DGCA 1
+```{r}
+p <- ggplot(scores_by_flow) + geom_point(aes_string(x = "n_hosts",
+                                             y = "n_con_user",
+                                             color = "anomalous")) +
+      theme_dark() + 
+      scale_colour_manual(values = c("#FFFFFF", "#FF0040")) +
+      labs(x = "count of distinct hosts in 10 minutes", y = "connections per user in 10 minutes") +
+      theme(legend.position = "top")
+
+p + theme(title = element_text(size = 8),
+            legend.text = element_text(size = 7),
+            axis.title.x = element_text(size = 7), axis.title.y = element_text(size = 7)) +
+  labs(title = "Heavy connections analysed\nusing UNADA-DGCA")
+ggsave("final_plots/plot13_report.png", width = 8, height = 8, units = "cm")
+
+p
+ggsave("final_plots/plot13_ppt.png", width = 10, height = 10, units = "cm")
+```
+
+UNADA-DGCA 2
+```{r}
+p2 <- ggplot(scores_by_flow) + geom_point(aes_string(x = "CL_RTT",
+                                             y = "CL_Retrans",
+                                             color = "anomalous")) +
+      theme_dark() + 
+      scale_colour_manual(values = c("#FFFFFF", "#FF0040")) +
+      labs(x = "return-trip delays user-proxy", y = "re-transmissions user-proxy") +
+      theme(legend.position = "top")
+
+p2 + theme(title = element_text(size = 8),
+          legend.text = element_text(size = 7),
+          axis.title.x = element_text(size = 7), axis.title.y = element_text(size = 7)) +
+  labs(title = "Heavy connections analysed\nusing UNADA-DGCA")
+ggsave("final_plots/plot14_report.png", width = 8, height = 8, units = "cm")
+
+p2
+ggsave("final_plots/plot14_ppt.png", width = 10, height = 10, units = "cm")
+```
+
+Select 4 CDFs for ppt:
+```{r}
+
+cdfs_all %>% filter(variable %in% c("bytesSent", "CL_RTT", "CL_Retrans", "download_speed_OS_clean")) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + 
+  scale_x_log10() + 
+  facet_wrap(~variable, nrow = 2, ncol = 2, scales = "free_x") +
+  labs(x = NULL, y = "cumulative distribution",
+       title = "CDF for selected QoS measures",  caption = "Note: values on log scale.") 
+
+ggsave("final_plots/plot_CDFs_ppt.png", width = 22, height = 14, units = "cm")
+
+```
+
+Traffic of most visited hosts
+```{r}
+top100_hosts_query <- "WITH TOTALS AS (SELECT COUNT(*) AS all_obs FROM logs.raw_view_clean),
+
+HOSTS AS (SELECT hostFull, host2, COUNT(*) n_obs, ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS rank
+    FROM logs.raw_view_clean 
+      GROUP BY hostFull, host2
+        ORDER BY n_obs DESC)
+        
+SELECT hostFull, host2, rank, n_obs, n_obs/all_obs AS share
+  FROM HOSTS CROSS JOIN TOTALS
+    LIMIT 100"
+
+top100_hosts <- bq_project_query("case-study-2-nec-team", top100_hosts_query) %>% bq_table_download()
+
+```
+
+```{r}
+top100_hosts %>% filter(rank < 21) %>% 
+  ggplot() + geom_col(aes(x = rank, y = share, fill = host2)) + scale_y_continuous(labels = label_percent()) +
+  guides(fill = "none") + 
+  labs(title = "Traffic share of most-visited host IPs",
+       subtitle = "(colored by domain)")
+
+ggsave("final_plots/share_hosts_ppt.png", width = 10, height = 10, units = "cm")
+
+```
+

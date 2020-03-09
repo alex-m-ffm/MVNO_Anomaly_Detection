@@ -1,0 +1,269 @@
+---
+title: "UNADA"
+output: html_notebook
+---
+
+```{r load libraries}
+library(tidyverse)
+library(dbscan)
+library(lubridate)
+
+```
+
+```{r}
+# read data from previously created file
+data <- read.csv("heavy_flows_with_agg_10min.csv", stringsAsFactors = F) %>% 
+  mutate(Ts = as.POSIXct(Ts, tz = "Europe/Berlin"))
+```
+
+
+```{r define max-min function}
+
+#define max-min normalisation as used in paper
+max_min <- function(x) {
+  x <- (x - min(x, na.rm = TRUE))/(max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+```
+
+Define the knee points for anomaly scores according to the Kneedle algorithm.
+
+```{r}
+kneedle <- function(x, s = 1) {
+  scores <- sort(x[x > 0])
+
+#restrict yourself only to the curving part (use minimum and maximum only once)
+# scores <- c(scores[(scores > min(scores)) & (scores < max(scores))], max(scores))
+
+normal_score <- max_min(scores)
+
+# Kneedle
+
+#fit smoothing through data
+smoothed_scores <- smooth.spline(1:length(scores), scores, cv= T)
+
+df <- data.frame(normal_x = ((1:length(scores)) - 1) / (length(scores)-1), 
+                 normal_y = (smoothed_scores$y - min(smoothed_scores$y, na.rm = T)) / 
+                  (max(smoothed_scores$y, na.rm = T) - min(smoothed_scores$y)))%>% 
+  mutate(difference = normal_y - normal_x, 
+          # find local maxima
+          local_max = (difference > lag(difference, 1)) &  (difference > lead(difference, 1)),
+          # define threshold value
+          t_lmx = case_when(local_max == TRUE ~ normal_y - s * sum(normal_x - lag(normal_x), na.rm = T)/(length(normal_x) - 1),
+                            TRUE ~ NA_real_)
+         ) %>% cbind(normal_score) %>% 
+  cbind(scores) %>% 
+  fill(., t_lmx)
+
+#initialise at first local maximum
+i <- which(df$local_max)[1]
+knee <- df$scores[i]
+
+while (df[i+1, "difference"] > df[i+1, "t_lmx"]) {
+  i <- i + 1
+  if (df[i, "local_max"] == TRUE) {
+    knee <- df[i, "scores"]
+  }
+}
+
+return(knee)
+}
+```
+
+```{r}
+normalised <- data %>%
+  select(Ts, userID, hostFull, isHTTPS, everything()) %>% 
+  #normalise to 0-1 space
+  mutate_at(., 5:length(names(.)), max_min) %>% 
+  #remove some variables that should not be considered
+  select(-c(bytesReceived, bytesReceivedProxy))
+```
+
+
+```{r}
+DGCA <- function(df, eps, minpoints_dense){
+  partition <- df %>% 
+  # cut data range into factors with numeric range cut in ten equal parts
+  mutate_all(list(fct = function(x) cut(x, 10)))
+  
+  # store the non-empty units and calculate their centers and their density
+  non_empty_units <- partition %>% group_by_at(vars(ends_with("fct"))) %>% 
+    mutate(dens = n()) %>% 
+    summarise_all(mean) %>% ungroup()
+
+  dense_units <- filter(non_empty_units, dens >= minpoints_dense)
+
+  units_to_be_visited <- non_empty_units
+  dense_units_to_be_visited <- dense_units
+  clustered <- dense_units[0, ]
+
+
+  i <- 1L
+  # add dense units to clusters as long as there are unclustered dense units
+  while (nrow(dense_units_to_be_visited) > 0){
+    # start with the first row
+  
+      # in case there is no cluster yet, declare the first dense cell as cluster 1
+      if (nrow(clustered)==0) {
+        cluster <- 1
+        # append the unit to the clustered df and remove it from the unclustered df
+        clustered[i, ] <- dense_units_to_be_visited[i, ]
+        clustered[i, "cluster"] <- i
+        dense_units_to_be_visited <- dense_units_to_be_visited[-i, ]
+      } else {
+        # compute distance to existing clustered dense units - if below eps assign to the same otherwise assign to new cluster
+        for (j in 1:nrow(clustered)){
+          k <- nrow(clustered) + 1
+          distance <- sqrt((dense_units_to_be_visited[i, 3] - clustered[j, 3])^2 + 
+                             (dense_units_to_be_visited[i, 4] - clustered[j, 4])^2) %>% as.numeric()
+          clustered[k, ] <- dense_units_to_be_visited[i, ]
+          if(distance <= eps){
+            clustered[k, "cluster"] <- clustered[j, "cluster"]
+          }else{
+            new_cluster <- max(clustered$cluster) + 1
+            clustered[k, "cluster"] <- new_cluster
+          }
+          dense_units_to_be_visited <- dense_units_to_be_visited[-i, ]
+        }
+        }
+
+}
+
+#assign points to clusters - noise points 0
+clusters <- left_join(partition, clustered, by = c(names(partition)[3:4])) %>% 
+  select(cluster) %>% mutate(cluster = if_else(is.na(cluster), 0L, cluster)) %>% .[[1]] %>% as.integer()
+
+return(list(eps = eps, 
+            minpoints_dense = minpoints_dense, 
+            cluster = clusters))
+}
+```
+
+Run UNADA-DGCA
+
+```{r UNADA-DGCA by Flow}
+start_time <-  Sys.time()
+
+    #initialise score with anomaly vector of zeroes
+anomaly_by_flow <-  rep(0, nrow(normalised))
+spaces_by_flow <- rep(NA, nrow(normalised))
+
+#Parameter for DGCA minpoints as 5% of dataset
+min_points <- round(0.05 * nrow(normalised))
+
+# epsilon neighborhood as 0.1 on the normalised scale
+eps <- 0.1
+
+for (i in 5:(length(names(normalised))-1)) {
+  for (j in (i+1):length(names(normalised))) {
+    partition <- normalised[,c(i, j)]
+    
+    # print(paste0("Clustering ", names(normalised)[i], " and ", names(normalised)[j], "..."))
+    #perform dbscan clustering - only spits out the cluster assignment
+    scan <- DGCA(normalised[,c(i, j)], eps = eps, minpoints_dense = min_points)
+
+    partition$cluster <- scan$cluster
+
+    #determine the center of the largest cluster 
+    centers <- partition %>% group_by(cluster) %>% mutate(count = n()) %>%  
+      #filter out noise points
+      filter(cluster >= 1) %>%
+      ungroup() %>% 
+      #restrict to largest cluster
+      filter(count == max(count)) %>%
+      #calculate center
+    summarise_at(vars(-c(group_cols(), count)), mean)
+    
+    if (length(centers[1]) == 0) print("DGCA could not find a cluster!")
+
+
+    #for all observations  in cluster 0, calculate the distance to the center of the largest cluster
+    
+    partition <- partition %>% 
+      mutate_at(., vars(1), list(dist_1 = function(x) x - as.numeric(centers)[1])) %>% 
+      mutate_at(., vars(2), list(dist_2 = function(x) x - as.numeric(centers)[2])) %>% 
+      mutate(anomaly = case_when(cluster == 0 ~ sqrt(dist_1^2 + dist_2^2),
+                                 TRUE ~ 0)) %>% 
+      select(-c(dist_1, dist_2)) %>% 
+      mutate(spaces = case_when(anomaly > 0 ~ list(paste(names(.)[1], names(.)[2])),
+                                TRUE ~ list(NULL))
+             )
+    
+    #add the scores
+    anomaly_by_flow <-  anomaly_by_flow + partition$anomaly
+    spaces <- paste0(
+      rep(colnames(partition)[1], nrow(partition))
+      , "_"
+      , rep(colnames(partition)[2], nrow(partition))
+    )
+    spaces[partition$anomaly == 0] <- NA
+    spaces_by_flow[spaces_by_flow == ""] <- NA
+    spaces_by_flow <- unlist(apply(cbind(spaces_by_flow, spaces), 1, 
+                                   function(x) paste(x[!is.na(x)], collapse = ", ")))
+    spaces_by_flow[spaces_by_flow == ""] <- NA
+  }
+}
+
+knee <- kneedle(anomaly_by_flow)
+
+scores_by_flow <- cbind(data, anomaly = anomaly_by_flow, spaces = spaces_by_flow) %>% 
+  mutate(anomalous = anomaly_by_flow > knee)
+
+
+
+print(paste(sum(scores_by_flow$anomalous), "anomalous connections detected."))
+print(Sys.time()-start_time)
+
+rm(start_time)
+
+```
+
+```{r scatterplots}
+scores_by_flow <- scores_by_flow %>% 
+  #reorder columns
+   select(Ts, userID, hostFull, isHTTPS, bytesReceived, bytesReceivedProxy, everything())
+
+for (i in 7:(length(names(scores_by_flow))-4)){
+  for (j in (i+1):(length(names(scores_by_flow))-3)){
+    p <- ggplot(scores_by_flow) + geom_point(aes_string(x = names(scores_by_flow)[i],
+                                             y = names(scores_by_flow)[j],
+                                             color = "anomalous")) +
+      theme_dark() +
+      scale_colour_manual(values = c("#FFFFFF", "#FF0040")) +
+      labs(title = "Heavy connections clustered using DGCA",
+           subtitle = paste0("x-axis: ", names(scores_by_flow)[i], ", y-axis: ", names(scores_by_flow)[j]),
+           caption = paste0("Note: Anomalies are declared based on all feature subspaces.\n",
+                            "In total UNADA detected ", sum(scores_by_flow$anomalous), " anomalous connections."))
+    ggsave(paste0("plots/DGCA_", names(scores_by_flow)[i], "_", names(scores_by_flow)[j], ".png"))
+
+  }
+}
+```
+
+```{r}
+# add host domains
+scores_by_flow <- scores_by_flow %>% mutate(hostDomain = str_split(hostFull, "\\.") %>% 
+         map_chr(., function(text) text[2])
+       )
+```
+
+```{r}
+scores_by_flow %>% group_by(fct_explicit_na(spaces)) %>% summarise(n = sum(anomalous)) %>% arrange(desc(n))
+```
+
+```{r}
+scores_by_flow %>% filter(anomalous==T) %>% summarise(anomalous_users = length(unique(userID)))
+scores_by_flow %>% summarise(total_users = length(unique(userID)))
+```
+```{r}
+scores_by_flow %>% ggplot() + geom_boxplot(aes(x = anomalous, y = download_speed_CL_clean))
+```
+
+Are anomalies concentrated in a few timeslots?
+
+```{r}
+scores_by_flow %>% mutate(time = floor_date(Ts, unit = "10 minutes")) %>% 
+  filter(anomalous==T) %>% 
+  summarise(anomalous_time_slots = length(unique(time)))
+```
+

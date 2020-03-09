@@ -1,0 +1,198 @@
+---
+title: "Summary statistics detailed"
+output: html_notebook
+---
+
+```{r include=FALSE}
+library(tidyverse)
+library(DBI)
+library(bigrquery)
+```
+
+Let's retrieve CDFs for all variables of the cleaned dataset:
+
+```{r}
+con <- DBI::dbConnect(bigquery(), 
+                      project = "case-study-2-nec-team",
+                      dataset = "logs")
+
+table <-  tbl(con, "raw_view")
+
+vars <- table$ops$vars
+numeric_vars <- vars[c(3:5, 10:27)]
+```
+
+```{r}
+cdf_query <- paste("SELECT", 
+                   paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view`")
+
+cdfs_all <- bq_project_query("case-study-2-nec-team", cdf_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  group_by(variable) %>% arrange(CDF) %>% ungroup()
+```
+CDFs for all flows
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_all %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name)) 
+print(p)
+}
+```
+
+All CDFs are affected by extreme outliers.
+
+Let's try again filtering out the maxima:
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_all %>% filter(variable == name & CDF < 1) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name, "until the 99%-ile")) 
+print(p)
+}
+```
+
+Statistics per user:
+```{r}
+aggregate_user <- paste("SELECT userID,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view` GROUP BY userid")
+
+cdf_user_query <- paste("WITH agg_user AS (", aggregate_user, ") SELECT",
+                        paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM agg_user")
+
+cdfs_by_user <- bq_project_query("case-study-2-nec-team", cdf_user_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_user %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name, "aggregated by user")) 
+print(p)
+}
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_user %>% filter(variable == name & CDF < 1) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name, "until 99%-ile, aggregated by user")) 
+print(p)
+}
+```
+
+Let's aggregate by host domain (host2)
+
+```{r}
+aggregate_host <- paste("SELECT host2,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view` GROUP BY host2")
+
+cdf_host_query <- paste("WITH agg_host AS (", aggregate_user, ") SELECT",
+                        paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM agg_host")
+
+cdfs_by_host <- bq_project_query("case-study-2-nec-team", cdf_host_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_host %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name, "aggregated by host")) 
+print(p)
+}
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_host %>% filter(variable == name & CDF < 1) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + labs(title = paste("CDF for", name, "until 99%-ile, aggregated by host domain")) 
+print(p)
+}
+```
+
+Let's have a look at developments over time (hours)
+
+```{r}
+time_query <- paste("SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view` GROUP BY time")
+
+time_series <- bq_project_query("case-study-2-nec-team", time_query) %>% 
+  bq_table_download() %>% arrange(time) %>% filter(time >= "2018-09-05 02:00:00") %>% 
+  pivot_longer(names(.)[2:length(names(.))], names_to = "variable")
+
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- time_series %>% filter(variable == name | variable == "connections") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = paste("time series for", name, "and connections")) 
+print(p)
+}
+```
+
+For some variables developments are not well visible due to the extreme event on 7 September. Let's filter this out
+
+```{r}
+for (name in numeric_vars) {
+p <- time_series %>% filter((variable == name | variable == "connections") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = paste("time series for", name, "and connections")) 
+print(p)
+}
+```
+
+share of most important hosts:
+```{r}
+share_query <- "WITH TOTAL AS (SELECT count(*) AS flows FROM logs.raw_view),
+  PER_HOST AS (SELECT host2, count(*) AS flows_per_host FROM logs.raw_view 
+                  GROUP BY host2)
+SELECT host2, flows_per_host / flows * 100 AS share 
+  FROM PER_HOST CROSS JOIN TOTAL 
+        ORDER BY flows_per_host DESC"
+
+share_host <- bq_project_query("case-study-2-nec-team", share_query) %>% 
+  bq_table_download() 
+```
+
+```{r}
+availability_query <- paste0("SELECT ", 
+                        paste0("COUNT(", numeric_vars, ") AS ", numeric_vars, collapse = ", "), " ",
+                        "FROM `case-study-2-nec-team.logs.raw_view`")
+
+availability <- bq_project_query("case-study-2-nec-team", availability_query) %>% bq_table_download() %>% 
+  pivot_longer(., names(.), names_to = "variable", values_to = "count") 
+
+availability %>% 
+  #remove computed variables 
+  # .[c(1:7, 10:11), ] %>% 
+  mutate(variable = fct_reorder(variable, count)) %>% 
+  ggplot() + geom_col(aes(x = variable, y = count)) + coord_flip()
+```
+

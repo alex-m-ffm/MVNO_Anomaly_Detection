@@ -1,0 +1,41 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+```{r}
+library(tidyverse)
+library(DBI)
+library(bigrquery)
+```
+
+Download data on heavy flows including
+
+```{r}
+heavy_query <- "WITH upper_bound AS (SELECT APPROX_QUANTILES(bytesReceived, 100)[OFFSET(95)] AS upper FROM logs.raw_view_clean),
+
+  BY_USER AS (SELECT TIMESTAMP_MILLIS(10*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), 10*60*1000)) AS time, userID, COUNT(DISTINCT hostFull) AS n_hosts, 
+                COUNT(*) AS n_con_user
+                  FROM logs.raw_view_clean
+                    GROUP BY time, userID),
+  
+  BY_FLOW AS (SELECT TIMESTAMP_MILLIS(10*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), 10*60*1000)) AS time, userID, hostFull, 
+                COUNT(*) AS n_con_flow
+                  FROM logs.raw_view_clean
+                    GROUP BY time, userID, hostFull)
+
+SELECT Ts, raw_view_clean.userID, bytesSent, bytesReceived, bytesReceivedProxy, raw_view_clean.hostFull, isHTTPS, CL_RTT, OS_RTT, CL_Retrans, OS_Retrans, download_speed_CL_clean, download_speed_OS_clean, 
+    n_hosts, n_con_user, n_con_flow
+  FROM logs.raw_view_clean 
+    CROSS JOIN upper_bound
+      LEFT JOIN BY_USER 
+        ON TIMESTAMP_MILLIS(10*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), 10*60*1000)) = BY_USER.time AND raw_view_clean.userID = BY_USER.userID
+          LEFT JOIN BY_FLOW
+            ON TIMESTAMP_MILLIS(10*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), 10*60*1000)) = BY_FLOW.time AND raw_view_clean.userID = BY_FLOW.userID AND raw_view_clean.hostFull = BY_FLOW.hostFull
+              WHERE bytesReceived > upper;"
+
+data <- bq_project_query("case-study-2-nec-team", heavy_query) %>% 
+  bq_table_download()
+```
+

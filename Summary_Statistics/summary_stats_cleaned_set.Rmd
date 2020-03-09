@@ -1,0 +1,627 @@
+---
+title: "Summary statistics detailed"
+output: html_notebook
+---
+
+```{r Load libraries, include=FALSE}
+library(tidyverse)
+library(DBI)
+library(bigrquery)
+```
+
+Let's retrieve CDFs for all variables of the cleaned dataset:
+
+```{r connect to BigQuery}
+con <- DBI::dbConnect(bigquery(), 
+                      project = "case-study-2-nec-team",
+                      dataset = "logs")
+
+table <-  tbl(con, "raw_view_clean")
+
+vars <- table$ops$vars
+numeric_vars <- vars[c(3:5, 10:27)]
+```
+
+```{r Compute approximate CDFs over all connections}
+cdf_query <- paste("SELECT", 
+                   paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean`")
+
+cdfs_all <- bq_project_query("case-study-2-nec-team", cdf_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  group_by(variable) %>% arrange(CDF) %>% ungroup()
+```
+CDFs for all flows
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_all %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + labs(title = paste("CDF for", name),
+                                                                 caption = "Note: variable values on log scale.") 
+print(p)
+ggsave(paste0("plots/CDF_", name, ".png"))
+}
+```
+
+All CDFs are affected by extreme outliers.
+
+Statistics per user:
+```{r}
+aggregate_user <- paste("SELECT userID,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY userid")
+
+cdf_user_query <- paste("WITH agg_user AS (", aggregate_user, ") SELECT",
+                        paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM agg_user")
+
+cdfs_by_user <- bq_project_query("case-study-2-nec-team", cdf_user_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_user %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + labs(title = paste("CDF for", name, "aggregated by user"),
+                                                                 caption = "Note: variable values on log scale.") 
+print(p)
+ggsave(paste0("plots/CDF_", name, "_agg_by_user.png"))
+}
+```
+
+How many connections does every user start in a given time window?
+
+```{r}
+
+minutes <- 10
+
+connnections_per_user_query <- paste0("WITH con_by_user AS (SELECT TIMESTAMP_MILLIS(", minutes,"*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time,
+                                      COUNT(*) AS flows, COUNT (DISTINCT hostFull) as hosts, 
+                                      COUNT(DISTINCT host2) as domains
+                                    FROM `case-study-2-nec-team.logs.raw_view_clean` 
+                                      GROUP BY userID, time)
+                               SELECT APPROX_QUANTILES(flows, 100) AS flows,
+                                  APPROX_QUANTILES(hosts, 100) AS hosts,
+                                  APPROX_QUANTILES(domains, 100) AS domains,
+                                FROM con_by_user")
+
+cdf_connections_per_user <- bq_project_query("case-study-2-nec-team", connnections_per_user_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+
+cdf_connections_per_user %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = variable)) + scale_x_log10() + labs(title = paste0("CDF for connections per user in a ", minutes, "-minute window"),
+                                                                 caption = "Note: variable values on log scale.") 
+
+ggsave("plots/connections_per_user.png")
+
+```
+Users may log multiple connections within 10 minutes, but often the connections go to the same host. Also, many connections go to different subpages of the same domain. more than half of the the time users. 
+
+```{r}
+connnections_per_host_query <- paste0("WITH con_by_host AS (SELECT TIMESTAMP_MILLIS(", minutes,"*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time,
+                                      COUNT(*) AS flows, COUNT (DISTINCT userId) as users
+                                    FROM `case-study-2-nec-team.logs.raw_view_clean` 
+                                      GROUP BY hostFull, time)
+                               SELECT APPROX_QUANTILES(flows, 100) AS flows,
+                                  APPROX_QUANTILES(users, 100) AS users
+                                FROM con_by_host")
+
+cdf_connections_per_host <- bq_project_query("case-study-2-nec-team", connnections_per_host_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+
+cdf_connections_per_host %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = variable)) + scale_x_log10() + labs(title = paste0("CDF for connections per host in a ", minutes, "-minute window"),
+                                                                 caption = "Note: variable values on log scale.") 
+
+ggsave("plots/connections_per_host.png")
+
+```
+
+
+
+Let's aggregate by host domain (host2)
+
+```{r}
+aggregate_host <- paste("SELECT host2,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY host2")
+
+cdf_host_query <- paste("WITH agg_host AS (", aggregate_user, ") SELECT",
+                        paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM agg_host")
+
+cdfs_by_host <- bq_project_query("case-study-2-nec-team", cdf_host_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_host %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + labs(title = paste("CDF for", name, "aggregated by host"),
+                                                                 caption = "Note: variable values on log scale.") 
+print(p)
+}
+```
+
+How about user and host combinations?
+
+```{r}
+aggregate_user_host <- paste("SELECT userId, hostFull,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY userId, hostFull")
+
+cdf_user_host_query <- paste("WITH agg_user_host AS (", aggregate_user, ") SELECT",
+                        paste0("approx_quantiles(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                   "FROM agg_user_host")
+
+cdfs_by_user_host <- bq_project_query("case-study-2-nec-team", cdf_user_host_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  # reshape to long format to use in charts
+  pivot_longer(., names(.)[1:length(names(.))-1], names_to = "variable") %>% 
+  arrange(variable, CDF)
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- cdfs_by_user_host %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + labs(title = paste("CDF for", name, "aggregated by user and host combination"),
+                                                                 caption = "Note: variable values on log scale.") 
+print(p)
+}
+```
+
+Let's have a look at developments over time (hours)
+
+```{r}
+time_query <- paste("SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections,", 
+                        paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time")
+
+time_series <- bq_project_query("case-study-2-nec-team", time_query) %>% 
+  bq_table_download() %>% arrange(time) %>% filter(time >= "2018-09-05 02:00:00") %>% 
+  pivot_longer(names(.)[2:length(names(.))], names_to = "variable")
+
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- time_series %>% filter(variable == name | variable == "connections") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = paste("time series for", name, "and connections")) 
+print(p)
+}
+```
+
+For some variables developments are not well visible due to the extreme event on 7 September. Let's filter this out
+
+```{r}
+for (name in numeric_vars) {
+p <- time_series %>% filter((variable == name | variable == "connections") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = paste("time series for", name, "and connections")) 
+print(p)
+}
+```
+
+Selection of interesting variables for interesting chart:
+```{r}
+time_series %>% filter(variable %in% c("connections", "CL_RTT", "CL_Retrans", "OS_Retrans", "download_speed_CL_clean", "download_speed_OS_clean") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "time series for connections and various QoS measures per hour") 
+ggsave("plots/QoS_timeseries.png", width = 16, height = 20, units = "cm")
+```
+
+
+Time series correlation:
+```{r}
+ts_cor <- time_series %>% pivot_wider(., names_from = variable) %>% select(-time) %>% cor()
+```
+At hourly aggregation almost everything is highly correlated with the load on the network in terms of number of connections.
+
+
+Let's filter how tail observations in terms of bytesReceived compare against normal flows:
+```{r}
+breakdown_load_query <- paste("WITH upper_bound AS (SELECT APPROX_QUANTILES(bytesReceived, 100)[OFFSET(95)] AS upper FROM logs.raw_view_clean)
+                              SELECT CASE WHEN bytesReceived > upper THEN 'heavy' ELSE 'normal' END AS load,",
+                              paste0("APPROX_QUANTILES(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                              "FROM logs.raw_view_clean CROSS JOIN upper_bound
+                                GROUP BY load
+                              
+                              UNION ALL
+                              SELECT 'all' AS load,",
+                              paste0("APPROX_QUANTILES(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                              "FROM logs.raw_view_clean")
+
+breakdown_load <- bq_project_query("case-study-2-nec-team", breakdown_load_query) %>% 
+  bq_table_download() %>% unnest(., names(.)[2:length(names(.))]) %>% 
+  group_by(load) %>% mutate(CDF = seq(0, 1, 0.01)) %>% ungroup() %>% 
+  pivot_longer(., 2:22, names_to = "variable")
+  
+                              
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- breakdown_load  %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = load)) + scale_x_log10() + 
+  labs(title = paste("CDF for", name, "by load"), caption = "Note: Heavy load is defined as bytesReceived in the top 5%, normal is below.") 
+print(p)
+# ggsave(paste0("plots/CDF_", name, "_by_load.png"))
+}
+```
+
+What is the share of bandwidth of heavy loads?
+
+```{r}
+
+minutes <- 10
+
+breakdown_load_ts_query <- paste("WITH upper_bound AS (SELECT APPROX_QUANTILES(bytesReceived, 100)[OFFSET(95)] AS upper FROM logs.raw_view_clean)
+                              SELECT CASE WHEN bytesReceived > upper THEN 'heavy' ELSE 'normal' END AS load,
+                              TIMESTAMP_MILLIS(", minutes, "*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time, count(*) AS connections,",
+                              paste0("SUM(", volumes, ") AS ", volumes, collapse = ", "),
+                              "FROM logs.raw_view_clean CROSS JOIN upper_bound
+                                GROUP BY time, load")
+
+breakdown_load_ts <- bq_project_query("case-study-2-nec-team", breakdown_load_ts_query) %>% 
+  bq_table_download() %>% pivot_longer(., 3:6, names_to = "variable") %>% arrange(time, variable, load)
+  
+```
+
+```{r}
+breakdown_load_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00")%>% 
+  ggplot() + geom_area(aes(time, value, fill = load)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "Bandwidth and connections by amount of data downloaded",
+       subtitle = "(total bytes transferred and connections per time-window)") 
+
+ggsave("plots/bandwidth_by_load.png", width = 16, height = 20, units = "cm")
+```
+
+
+Do connections used mainly for downloads differ from those used for uploads?
+
+```{r}
+breakdown_updown_query <- paste("SELECT CASE WHEN bytesReceived >= bytesSent THEN 'down' ELSE 'up' END AS direction,",
+                              paste0("APPROX_QUANTILES(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                              "FROM logs.raw_view_clean 
+                                GROUP BY direction
+                              
+                              UNION ALL
+                              SELECT 'all' AS direction,",
+                              paste0("APPROX_QUANTILES(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "),
+                              "FROM logs.raw_view_clean")
+
+breakdown_updown <- bq_project_query("case-study-2-nec-team", breakdown_updown_query) %>% 
+  bq_table_download() %>% unnest(., names(.)[2:length(names(.))]) %>% 
+  group_by(direction) %>% mutate(CDF = seq(0, 1, 0.01)) %>% ungroup() %>% 
+  pivot_longer(., 2:22, names_to = "variable")
+  
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- breakdown_updown  %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = direction)) + scale_x_log10() + 
+  labs(title = paste("CDF for", name, "by direction"), caption = "Note: Download connections are defined as flows where bytesReceived >= bytesSent.") 
+print(p)
+ggsave(paste0("plots/CDF_", name, "_by_direction.png"))
+}
+```
+
+Let's check the bandwidth of the MVNO 
+
+```{r}
+# more flexible time window with a bit more complicated query
+minutes <- 15
+volumes <- c("bytesReceived", "bytesReceivedProxy", "bytesSent")
+
+time_series_bandwidth_query <- paste("SELECT TIMESTAMP_MILLIS(", minutes, "*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time, count(*) AS connections,", 
+                        paste0("SUM(", volumes, ")/", minutes, "/60 AS ", volumes, collapse = ", "),
+                   "FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time")
+
+time_series_bandwidth <- bq_project_query("case-study-2-nec-team", time_series_bandwidth_query) %>% 
+  bq_table_download() %>% arrange(time) %>% filter(time >= "2018-09-05 02:00:00") %>% 
+  pivot_longer(names(.)[2:length(names(.))], names_to = "variable")
+```
+
+```{r}
+
+for (name in volumes) {
+p <- time_series_bandwidth %>% filter((variable == name | variable == "connections") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = paste("time series for", name, "bandwidth and connections"),
+       subtitle = "(bandwith in bytes per second)") 
+print(p)
+ggsave(paste0("plots/ts_", name, "_", minutes,"minutes_window.png"))
+print(paste("Maximum bandwidth for", name, "-", filter(time_series_bandwidth, variable == name) %>% 
+              summarise(mean = max(value, na.rm = T)) %>% as.numeric(mean) / 1024 / 1024, "MB/s."))
+}
+```
+
+Do we find differences in the speed between sessions?
+
+```{r}
+speeds <- c("download_speed_CL_clean", "download_speed_OS_clean", 
+            "upload_speed_CL_clean", "upload_speed_OS_clean")
+
+#CDF of standard deviation in speeds of unique user-host combinations
+variation_query <- paste0("WITH flows AS (SELECT userID, hostFull,", 
+                          paste0("STDDEV_POP(", speeds, ") AS DEV_", speeds, collapse = ", "),
+                          ", COUNT(*) AS number FROM logs.raw_view_clean
+                            GROUP BY userID, hostFull)
+                          ",
+                          "SELECT ", 
+                          paste0("APPROX_QUANTILES(DEV_", speeds, ", 100) AS ", speeds, collapse = ", "),
+                          " FROM flows
+                              WHERE number > 1")
+
+cdf_variation <- bq_project_query("case-study-2-nec-team", variation_query) %>% 
+  bq_table_download() %>% unnest(., names(.)) %>% 
+  mutate(CDF = seq(0, 1, 0.01)) %>%  
+  pivot_longer(., 1:4, names_to = "variable") %>% arrange(variable, CDF)
+
+```
+
+```{r}
+for (name in speeds) {
+p <- cdf_variation  %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + 
+  labs(title = paste("CDF for standard deviation in", name, "between sessions"), 
+       subtitle = "(in KB/s)", 
+       caption = "Note: Flows between users and hosts with only one observtion are excluded.") 
+print(p)
+ggsave(paste0("plots/CDF_stddev_", name, ".png"))
+}
+```
+
+In the download_speed there is quite a large share of flows (around 25%) with only little variation, less than 10KB/s.
+Let's see if this can also be traced to some providers.
+
+```{r}
+#CDF of standard deviation in speeds of unique user-host combinations
+variation_by_host_query <- paste0("WITH flows AS (SELECT userID, hostFull, host2, ", 
+                          paste0("STDDEV_POP(", speeds, ") AS DEV_", speeds, collapse = ", "),
+                          ", COUNT(*) AS number FROM logs.raw_view_clean
+                            GROUP BY userID, hostFull, host2),
+                          ",
+                          "avg_devs AS (SELECT host2, ", 
+                          paste0("AVG(DEV_", speeds, ") AS ", speeds, collapse = ", "),
+                          " FROM flows
+                              WHERE number > 1
+                                GROUP BY host2)
+                          SELECT ", paste0("APPROX_QUANTILES(", speeds, ", 100) AS ", speeds, collapse = ", "),
+                          "
+                          FROM avg_devs")
+
+cdf_variation_by_host <- bq_project_query("case-study-2-nec-team", variation_by_host_query) %>% 
+  bq_table_download() %>% unnest(., names(.)) %>% 
+  mutate(CDF = seq(0, 1, 0.01)) %>%  
+  pivot_longer(., 1:4, names_to = "variable") %>% arrange(variable, CDF)
+
+```
+
+```{r}
+for (name in speeds) {
+p <- cdf_variation_by_host  %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF)) + scale_x_log10() + 
+  labs(title = paste("CDF for standard deviation in", name, "between sessions,
+                     aggregated by host domain"), 
+       subtitle = "(in KB/s)", 
+       caption = "Note: Flows between users and hosts with only one observtion are excluded.") 
+ggsave(paste0("plots/CDF_stddev_", name, "_by_host.png"))
+print(p)
+}
+```
+
+Now let's look into whether there are different characteristics of those "multi-connections" compared to the single ones.
+
+```{r}
+single_multi_query <- paste("WITH COUNT AS (SELECT Ts, userID, hostFull, 
+                  CASE WHEN COUNT(*) > 1 THEN 'Multi' ELSE 'Single' END AS is_multi 
+                FROM logs.raw_view_clean GROUP BY Ts, userID, hostFull)
+                
+SELECT is_multi,",  paste0("APPROX_QUANTILES(", numeric_vars, ", 100) AS ", numeric_vars, collapse = ", "), 
+  "
+  FROM logs.raw_view_clean LEFT JOIN COUNT
+    USING(Ts, userID, hostFull)
+      GROUP BY is_multi")
+
+single_multi <- bq_project_query("case-study-2-nec-team", single_multi_query) %>% 
+  bq_table_download() %>% unnest(., names(.)[2: length(names(.))]) %>% 
+  group_by(is_multi) %>% 
+  mutate(CDF = seq(0, 1, 0.01)) %>%
+  ungroup() %>% 
+  pivot_longer(., 2:22, names_to = "variable") %>% arrange(is_multi, variable, CDF)
+
+```
+
+```{r}
+for (name in numeric_vars) {
+p <- single_multi  %>% filter(variable == name) %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = is_multi)) + scale_x_log10() + 
+  labs(title = paste("CDF for", name, "
+                     by number of simultaneous connections started"), 
+  caption = "Note: Multi-connections are those where multiple connections
+       between user and host are started in the same millisecond.") 
+print(p)
+ggsave(paste0("plots/CDF_", name, "_by_single_multi.png"))
+}
+```
+
+```{r}
+multi_count_query <- "WITH COUNTS AS (SELECT Ts, userID, hostFull, COUNT(*) AS n FROM `case-study-2-nec-team.logs.raw_view_clean`
+  GROUP BY Ts, userID, hostFull)
+  
+SELECT n as number, COUNT(*)*n as observations FROM COUNTS
+  GROUP BY n
+  ORDER BY n"
+
+multi_count <- bq_project_query("case-study-2-nec-team", multi_count_query) %>% 
+  bq_table_download()
+```
+
+```{r}
+multi_count %>% mutate(number_fct = case_when(number < 7 ~ as.character(number),
+                                              TRUE ~ "7-39")) %>% group_by(number_fct) %>% 
+  summarise(observations = sum(observations)) %>% 
+  ggplot() + geom_col(aes(x = number_fct, y = observations)) + scale_y_log10() + 
+  coord_flip() + labs(y = "number of connections", x = "connections started at once")
+
+ggsave(paste0("plots/simultaneous_connections.png"))
+```
+
+
+Let's look at the connection behaviour of downloads vs uploads
+
+```{r}
+breakdown_updown_ts_query <- paste("SELECT CASE WHEN bytesReceived >= bytesSent THEN 'down' ELSE 'up' END AS direction, TIMESTAMP_MILLIS(", minutes, "*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time,
+                                   COUNT(*) AS connections,",
+                              paste0("AVG(", numeric_vars, ") AS ", numeric_vars, collapse = ", "),
+                              "FROM logs.raw_view_clean 
+                                GROUP BY time, direction")
+
+breakdown_updown_ts <- bq_project_query("case-study-2-nec-team", breakdown_updown_ts_query) %>% 
+  bq_table_download() %>%
+  pivot_longer(., 3:24, names_to = "variable")
+  
+```
+
+```{r}
+for (name in c("connections", numeric_vars)) {
+p <- breakdown_updown_ts  %>% filter(variable == name & time < "2018-09-07 18:00:00" & time > "2018-09-05 00:00:00") %>% 
+  ggplot() + geom_line(aes(time, value, colour = direction)) + 
+  labs(title = paste("Time series for", name, "
+                     by main direction")) 
+print(p)
+ggsave(paste0("plots/ts_", name, "_by_direction.png"))
+}
+```
+
+Let's look at the bandwidth by direction:
+
+
+```{r}
+minutes <- 10
+breakdown_updown_bandwidth_ts_query <- paste("SELECT CASE WHEN bytesReceived >= bytesSent THEN 'down' ELSE 'up' END AS direction, TIMESTAMP_MILLIS(", minutes, "*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time,
+                                   ",
+                              paste0("SUM(", volumes, ") AS ", volumes, collapse = ", "),
+                              "FROM logs.raw_view_clean 
+                                GROUP BY time, direction")
+
+breakdown_updown_bandwidth_ts <- bq_project_query("case-study-2-nec-team", breakdown_updown_bandwidth_ts_query) %>% 
+  bq_table_download() %>%
+  pivot_longer(., 3:5, names_to = "variable")
+```
+
+```{r}
+breakdown_updown_bandwidth_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00")%>% 
+  ggplot() + geom_area(aes(time, value, fill = direction)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "Bandwidth and by main direction of transfer",
+       subtitle = "(total bytes transferred per time-window)") 
+ggsave("plots/bandwidth_by_direction.png", width = 16, height = 20, units = "cm")
+
+breakdown_updown_bandwidth_ts %>% filter(time > "2018-09-05 00:00:00" & time < "2018-09-07 18:00:00" & variable == "bytesSent")%>% 
+  ggplot() + geom_area(aes(time, value, fill = direction)) +
+  labs(title = "Upload bandwidth by main direction of transfer",
+       subtitle = "(total bytes transferred per time-window)") 
+ggsave("plots/upload_bandwidth_by_direction.png")
+```
+
+Investigate magnitude of transmission times.
+
+```{r}
+ratio_query <- "SELECT APPROX_QUANTILES(OS_Transmit_time_noSubstract / OS_Transmit_time, 100) AS OS_ratio, APPROX_QUANTILES(CL_Transmit_time_noSubstract / CL_Transmit_time, 100) AS CL_ratio
+  FROM logs.raw_view_clean"
+
+cdf_ratios <- bq_project_query("case-study-2-nec-team", ratio_query) %>% 
+  bq_table_download() %>% unnest(., names(.)) %>% 
+  mutate(CDF = seq(0, 1, 0.01)) %>% 
+  select(CDF, everything())
+```
+
+Check the number of connections per flow in given time window
+
+```{r}
+connnections_per_flow_query <- paste0("WITH con_by_flow AS (SELECT TIMESTAMP_MILLIS(", minutes,"*60*1000 * DIV(UNIX_MILLIS(TIMESTAMP(Ts)), ", minutes, "*60*1000)) AS time,
+                                      COUNT(*) AS connections
+                                    FROM `case-study-2-nec-team.logs.raw_view_clean` 
+                                      GROUP BY userID, hostFull, time)
+                               SELECT APPROX_QUANTILES(connections, 100) AS connections
+                                FROM con_by_flow")
+
+cdf_connections_per_flow <- bq_project_query("case-study-2-nec-team", connnections_per_flow_query) %>% 
+  bq_table_download() %>% 
+  # convert arrays into multiple rows
+  unnest(., cols = names(.)) %>% 
+  # add the comulative densities
+  mutate(CDF = seq(0, 1, 0.01)) 
+
+cdf_connections_per_flow %>% 
+  ggplot() + geom_line(aes(connections, CDF)) + scale_x_log10() + labs(title = paste0("CDF for connections per flow in a ", minutes, "-minute window"),
+                                                                 caption = "Note: variable values on log scale.") 
+
+ggsave("plots/connections_per_flow.png")
+
+```
+
+```{r}
+correlations_whole_dataset <- read.csv("correlations_full_sample.csv")
+
+correlations_whole_dataset %>% filter(i != j) %>% 
+  filter(i %in% c("bytesSent", "bytesReceived", "bytesReceivedProxy", "CL_RTT", "OS_RTT", "CL_Retrans", "OS_Retrans", "download_speed_CL_clean", "download_speed_OS_clean", "upload_speed_CL_clean", "upload_speed_OS_clean")) %>% 
+    filter(j %in% c("bytesSent", "bytesReceived", "bytesReceivedProxy", "CL_RTT", "OS_RTT", "CL_Retrans", "OS_Retrans", "download_speed_CL_clean", "download_speed_OS_clean", "upload_speed_CL_clean", "upload_speed_OS_clean")) %>% 
+  ggplot() + geom_tile(aes(x = i, y = j, fill = cor_ij)) + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    scale_fill_gradient(low="red", high="yellow") + labs(x = NULL, y = NULL)
+```
+
+
+```{r}
+save.image(file = "Alex.Rdata")
+```
+
+```{r}
+load("Alex.Rdata")
+```
+
+
+
