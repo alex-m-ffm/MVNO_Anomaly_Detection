@@ -328,3 +328,19 @@ ggsave("final_plots/share_hosts_ppt.png", width = 10, height = 10, units = "cm")
 
 ```
 
+```{r}
+breakdown_load  %>% filter(variable %in% c("CL_RTT", "CL_Retrans") & load %in% c("heavy", "normal")) %>% 
+  mutate(load = factor(load, c("normal", "heavy"))) %>% 
+  ggplot() + geom_line(aes(value, CDF, colour = load), size = 2) + 
+  scale_x_log10(labels = label_number(accuracy = 1)) + 
+  scale_colour_manual(values=c("green", "red")) +
+  facet_wrap(~variable, ncol = 2, scales = "free_x") + 
+  labs(x = NULL, y = "cumulative distribution", 
+       title = paste("CDF for QoS by load"), 
+       caption = "Note: Heavy load is defined as bytesReceived in the top 5%, normal is below.") +
+  theme(legend.position = "top")
+
+ggsave("final_plots/cdfs_load_ppt.png", width = 22, height = 10, units = "cm")
+
+```
+
