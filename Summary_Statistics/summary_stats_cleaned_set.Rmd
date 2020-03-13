@@ -614,6 +614,52 @@ correlations_whole_dataset %>% filter(i != j) %>%
     scale_fill_gradient(low="red", high="yellow") + labs(x = NULL, y = NULL)
 ```
 
+Let's look at the time series of unique users and hosts per hour
+
+```{r}
+time_query_2 <- "SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections,
+                      count(distinct userID) as users, count(distinct hostFull) as hosts
+                    FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time"
+
+time_series_2 <- bq_project_query("case-study-2-nec-team", time_query_2) %>% 
+  bq_table_download() %>% arrange(time) %>% filter(time >= "2018-09-05 02:00:00") %>% 
+  pivot_longer(names(.)[2:length(names(.))], names_to = "variable")
+```
+
+Now let's look at the average developments per user and per host
+
+```{r}
+time_query_3 <- "WITH USERS AS (SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections,
+                      userID, count(distinct hostFull) as hosts
+                    FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time, userID),
+                    
+                    HOSTS AS (SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections,
+                      hostFull, count(distinct userID) as users
+                    FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time, hostFull),
+                    
+                    TOTAL AS (SELECT DATETIME_TRUNC(Ts, HOUR) AS time, count(*) AS connections
+                      FROM `case-study-2-nec-team.logs.raw_view_clean` GROUP BY time),
+                      
+                     USERS_AGG AS (SELECT time, AVG(connections) AS con_per_user,
+                      AVG(hosts) AS hosts_per_user
+                    FROM USERS GROUP BY time),
+                    
+                     HOSTS_AGG AS (SELECT time, AVG(connections) AS con_per_host,
+                      AVG(users) AS users_per_host
+                    FROM HOSTS GROUP BY time)
+                      
+                    
+SELECT TOTAL.time, TOTAL.connections,
+            con_per_user, hosts_per_user,
+            con_per_host, users_per_host
+                    FROM TOTAL LEFT JOIN USERS_AGG ON TOTAL.time = USERS_AGG.time 
+                      LEFT JOIN HOSTS_AGG ON TOTAL.time = HOSTS_AGG.time"
+
+time_series_3 <- bq_project_query("case-study-2-nec-team", time_query_3) %>% 
+  bq_table_download() %>% arrange(time) %>% filter(time >= "2018-09-05 02:00:00") %>% 
+  pivot_longer(names(.)[2:length(names(.))], names_to = "variable")
+```
+
 
 ```{r}
 save.image(file = "Alex.Rdata")

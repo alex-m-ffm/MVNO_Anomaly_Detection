@@ -344,3 +344,99 @@ ggsave("final_plots/cdfs_load_ppt.png", width = 22, height = 10, units = "cm")
 
 ```
 
+Time series for times and speeds 
+```{r}
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+time_series %>% filter(variable %in% c("CL_Transmit_time_noSubstract", "CL_Transmit_time",
+                                       "OS_Transmit_time_noSubstract", "OS_Transmit_time") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + 
+  facet_wrap(~variable, nrow = 4, scales = "free_y") + 
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H") + 
+  labs(x = NULL, y = NULL, 
+       title = "average transmission times per hour", 
+       caption = "Note: The special period after Friday 6pm is excluded.")
+
+ggsave("final_plots/times_clean_vs_raw.png", width = 10, height = 10, units = "cm")
+
+```
+
+```{r}
+time_series %>% filter(variable %in% c("download_speed_CL_raw", "download_speed_CL_clean",
+                                       "upload_speed_CL_raw", "upload_speed_CL_clean") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + 
+  facet_wrap(~variable, nrow = 4, scales = "free_y") + 
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H") + 
+  labs(x = NULL, y = NULL, 
+       title = "average transmission speeds\nbetween user and proxy", 
+       caption = "Note: The special period after Friday 6pm is excluded.")
+
+ggsave("final_plots/speeds_CL_clean_vs_raw.png", width = 10, height = 10, units = "cm")
+```
+
+```{r}
+time_series %>% filter(variable %in% c("download_speed_OS_raw", "download_speed_OS_clean",
+                                       "upload_speed_OS_raw", "upload_speed_OS_clean") & time < "2018-09-07 18:00:00") %>% 
+  ggplot() + geom_line(aes(time, value)) + 
+  facet_wrap(~variable, nrow = 4, scales = "free_y") +
+  scale_x_datetime(date_breaks = "12 hours", date_labels = "%a\n%H") + 
+  labs(x = NULL, y = NULL, 
+       title = "average transmission times\nbetween proxy and host", 
+       caption = "Note: The special period after Friday 6pm is excluded.")
+
+ggsave("final_plots/speeds_OS_clean_vs_raw.png", width = 10, height = 10, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+create csv for Roberto
+
+```{r}
+time_series %>% filter(variable %in% c("CL_Transmit_time_noSubstract", "CL_Transmit_time",
+                                       "OS_Transmit_time_noSubstract", "OS_Transmit_time",
+                                       "download_speed_CL_raw", "download_speed_CL_clean",
+                                       "upload_speed_CL_raw", "upload_speed_CL_clean",
+                                       "download_speed_OS_raw", "download_speed_OS_clean",
+                                       "upload_speed_OS_raw", "upload_speed_OS_clean")) %>% 
+  pivot_wider(names_from = variable) %>% write.csv(file = "time_series_times_and_speeds.csv",row.names = F)
+```
+
+Time series of distinct users and hosts
+
+```{r}
+lct <- Sys.getlocale("LC_TIME"); 
+Sys.setlocale("LC_TIME", "C")
+
+time_series_2 %>% filter(time < "2018-09-07 18:00:00") %>% 
+  #change variable to ordered factor to manually define order in chart
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "Total connections and unique users and hosts per hour", 
+       x = NULL, y = NULL) +
+  scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H") +
+  #make strip texts smaller, remove y scales
+  theme(title = element_text(size = 9),
+        axis.ticks = element_blank())
+
+ggsave("final_plots/ts_unique_users_hosts.png", width = 22, height = 14, units = "cm")
+
+```
+
+Time series of hosts per user and user per host
+
+```{r}
+time_series_3 %>% filter(time < "2018-09-07 18:00:00") %>% 
+  #change variable to ordered factor to manually define order in chart
+  ggplot() + geom_line(aes(time, value)) + facet_grid(rows = vars(variable), scales = "free_y") +
+  labs(title = "Distinct hosts per user and users per host per hour", 
+       x = NULL, y = NULL) +
+  scale_x_datetime(date_breaks = "8 hours", date_labels = "%a\n%H") +
+  #make strip texts smaller, remove y scales
+  theme(title = element_text(size = 9),
+        strip.text.y = element_text(size = 5), 
+        axis.ticks = element_blank())
+
+ggsave("final_plots/ts_users_per_host_host_per_user.png", width = 22, height = 14, units = "cm")
+
+Sys.setlocale("LC_TIME", lct)
+```
+
